@@ -8,22 +8,58 @@ import logging
 import sys
 from volttron.platform.agent import utils
 from volttron.platform.vip.agent import Agent, Core, RPC
-import time
+from sqlalchemy import create_engine, Column, Integer, String, TIMESTAMP, UUID
+from sqlalchemy.orm import declarative_base, sessionmaker
+from sqlalchemy.engine import URL
+import uuid
+from datetime import datetime as dt
+import pytz
 
 _log = logging.getLogger(__name__)
 utils.setup_logging()
 __version__ = "0.1"
 
+url = URL.create(
+    drivername="postgresql",
+    username="postgres",
+    host="localhost",
+    database="postgres",
+    password="ganza112"
+)
+engine = create_engine(url)
+Base = declarative_base()
 
-def iaq(config_path, **kwargs):
+class RawData(Base):
+    __tablename__ = 'raw_data'
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    device_id = Column(String())
+    timestamp = Column(Integer(), nullable=False)
+    datetime = Column(TIMESTAMP, nullable=False)
+    datapoint = Column(String(), nullable=False)
+    value = Column(String(), nullable=False)
+
+    def to_dict(self):
+        """Convert the model instance to a dictionary with custom formatting."""
+        return {
+            'id': self.id,  # assuming you have these fields
+            'timestamp': str(self.timestamp),  # convert datetime to string
+            'datetime': str(self.datetime),
+            'datapoint': self.datapoint,
+            'value': self.value,
+            'device_id': self.device_id
+            # add other fields as needed
+        }
+
+def data_logger(config_path, **kwargs):
     """
     Parses the Agent configuration and returns an instance of
     the agent created using that configuration.
 
     :param config_path: Path to a configuration file.
     :type config_path: str
-    :returns: Iaq
-    :rtype: Iaq
+    :returns: DataLogger
+    :rtype: DataLogger
     """
     try:
         config = utils.load_config(config_path)
@@ -33,55 +69,74 @@ def iaq(config_path, **kwargs):
     if not config:
         _log.info("Using Agent defaults for starting configuration.")
 
+    Base.metadata.create_all(engine)
+    Session = sessionmaker(bind=engine)
+    session = Session()
+
     setting1 = int(config.get('setting1', 1))
     setting2 = config.get('setting2', "some/random/topic")
 
-    return Iaq(setting1, setting2, **kwargs)
+    return DataLogger(setting1, setting2, session, **kwargs)
 
 
-class Iaq(Agent):
+class DataLogger(Agent):
     """
     Document agent constructor here.
     """
 
-
-    def __init__(self, setting1=1, setting2="some/random/topic", **kwargs):
-        super(Iaq, self).__init__(**kwargs)
+    def __init__(self, setting1=1, setting2="payload", session=sessionmaker(bind=engine)(), **kwargs):
+        super(DataLogger, self).__init__(**kwargs)
         _log.debug("vip_identity: " + self.core.identity)
+
+        self.__session = session
 
         self.setting1 = setting1
         self.setting2 = setting2
 
         self.default_config = {"setting1": setting1,
                                "setting2": setting2}
-        
-        self.__id = None
-        self.__data = []
-        self.__time = 5
 
         # Set a default configuration to ensure that self.configure is called immediately to setup
         # the agent.
         self.vip.config.set_default("config", self.default_config)
+        # Hook self.configure up to changes to the configuration file "config".
+        self.vip.config.subscribe(self.configure, actions=["NEW", "UPDATE"], pattern="config")
 
+    def insert(self, body):
+        datetime_str = body['datetime']
+        date_time = dt.strptime(datetime_str, "%Y-%m-%d %H:%M:%S.%f")
+        timestamp = int(date_time.replace(tzinfo=pytz.UTC).timestamp())
+        datetime_timestamptz = date_time.replace(tzinfo=pytz.UTC)
 
-    def read_csv(self, config_path):
-        try:
-            # Extract ID from filename (e.g., "sample_iaq_data_Room101.csv" -> "sample_iaq_data_Room101")
+        temperature = RawData(
+            device_id=body["id"],
+            timestamp=timestamp,
+            datetime=datetime_timestamptz,
+            datapoint="temperature",
+            value=body["temperature"]
+        )
+        humidity = RawData(
+            device_id=body["id"],
+            timestamp=timestamp,
+            datetime=datetime_timestamptz,
+            datapoint="humidity",
+            value=body["humidity"]
+        )
+        co2 = RawData(
+            device_id=body["id"],
+            timestamp=timestamp,
+            datetime=datetime_timestamptz,
+            datapoint="co2",
+            value=body["co2"]
+        )
+        self.__session.add(temperature)
+        self.__session.add(humidity)
+        self.__session.add(co2)
+        self.__session.commit()
+        data = self.__session.query(RawData).all()[-1]
+        data_dict = data.to_dict()
+        _log.info("Query: {}".format(data_dict))
 
-            self.__id = config_path.split(".")[0]
-            self.__data = self.vip.config.get("data-101")
-            # print(self.__data)
-            
-            # # Read the CSV file
-            # with open(config_path, newline='') as csvfile:
-            #     # Skip header row and read all data
-            #     self.__data = list(csv.reader(csvfile, quotechar='|'))[1:]
-                
-            _log.info(f"Successfully read {len(self.__data)} rows from {config_path}")
-            
-        except Exception as e:
-            _log.error(f"Error reading CSV file: {str(e)}")
-            self.__data = []
 
     def configure(self, config_name, action, contents):
         """
@@ -104,8 +159,10 @@ class Iaq(Agent):
 
         self.setting1 = setting1
         self.setting2 = setting2
+        _log.info("Setting1: {}".format(self.setting1))
+        _log.info("Setting2: {}".format(self.setting2))
 
-        self._create_subscriptions(self.setting2)
+        self._create_subscriptions("payload")
 
     def _create_subscriptions(self, topic):
         """
@@ -119,10 +176,7 @@ class Iaq(Agent):
                                   callback=self._handle_publish)
 
     def _handle_publish(self, peer, sender, bus, topic, headers, message):
-        """
-        Callback triggered by the subscription setup using the topic from the agent's config file
-        """
-        pass
+        self.insert(message)
 
     @Core.receiver("onstart")
     def onstart(self, sender, **kwargs):
@@ -134,28 +188,12 @@ class Iaq(Agent):
 
         Usually not needed if using the configuration store.
         """
-        # Example publish to pubsub= 
+        # Example publish to pubsub
         self.vip.pubsub.publish('pubsub', "some/random/topic", message="HI!")
-        
-        self.read_csv("sample_iaq_data_Room101.csv")
-        self.boardcast()
-        # self.core.schedule(cron("* * * * *"), self.say_hello)
 
         # Example RPC call
         # self.vip.rpc.call("some_agent", "some_method", arg1, arg2)
         pass
-
-    def boardcast(self):
-        for data in self.__data:
-            payload = {
-                "datetime": data["datetime"],
-                "temperature": data["temperature"],
-                "humidity": data["humidity"],
-                "co2": data["co2"],
-                "id": self.__id
-            }
-            self.vip.pubsub.publish('pubsub', "payload", message=payload)
-            time.sleep(self.__time)
 
     @Core.receiver("onstop")
     def onstop(self, sender, **kwargs):
@@ -177,7 +215,7 @@ class Iaq(Agent):
 
 def main():
     """Main method called to start the agent."""
-    utils.vip_main(iaq, 
+    utils.vip_main(data_logger, 
                    version=__version__)
 
 
