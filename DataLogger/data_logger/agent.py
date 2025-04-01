@@ -24,7 +24,7 @@ url = URL.create(
     username="postgres",
     host="localhost",
     database="postgres",
-    password="ganza112"
+    password="P@ssw0rd!"
 )
 engine = create_engine(url)
 Base = declarative_base()
