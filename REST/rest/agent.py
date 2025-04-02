@@ -8,58 +8,21 @@ import logging
 import sys
 from volttron.platform.agent import utils
 from volttron.platform.vip.agent import Agent, Core, RPC
-from sqlalchemy import create_engine, Column, Integer, String, TIMESTAMP, UUID
-from sqlalchemy.orm import declarative_base, sessionmaker
-from sqlalchemy.engine import URL
-import uuid
-from datetime import datetime as dt
-import pytz
 
 _log = logging.getLogger(__name__)
 utils.setup_logging()
 __version__ = "0.1"
 
-url = URL.create(
-    drivername="postgresql",
-    username="postgres",
-    host="localhost",
-    database="postgres",
-    password="P@ssw0rd!"
-)
-engine = create_engine(url)
-Base = declarative_base()
 
-class RawData(Base):
-    __tablename__ = 'raw_data'
-
-    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    device_id = Column(String())
-    timestamp = Column(Integer(), nullable=False)
-    datetime = Column(TIMESTAMP, nullable=False)
-    datapoint = Column(String(), nullable=False)
-    value = Column(String(), nullable=False)
-
-    def to_dict(self):
-        """Convert the model instance to a dictionary with custom formatting."""
-        return {
-            'id': self.id,  # assuming you have these fields
-            'timestamp': str(self.timestamp),  # convert datetime to string
-            'datetime': str(self.datetime),
-            'datapoint': self.datapoint,
-            'value': self.value,
-            'device_id': self.device_id
-            # add other fields as needed
-        }
-
-def data_logger(config_path, **kwargs):
+def rest(config_path, **kwargs):
     """
     Parses the Agent configuration and returns an instance of
     the agent created using that configuration.
 
     :param config_path: Path to a configuration file.
     :type config_path: str
-    :returns: DataLogger
-    :rtype: DataLogger
+    :returns: Rest
+    :rtype: Rest
     """
     try:
         config = utils.load_config(config_path)
@@ -69,27 +32,20 @@ def data_logger(config_path, **kwargs):
     if not config:
         _log.info("Using Agent defaults for starting configuration.")
 
-    Base.metadata.create_all(engine)
-    Session = sessionmaker(bind=engine)
-    session = Session()
-
     setting1 = int(config.get('setting1', 1))
     setting2 = config.get('setting2', "some/random/topic")
 
-    return DataLogger(setting1, setting2, session, **kwargs)
+    return Rest(setting1, setting2, **kwargs)
 
 
-class DataLogger(Agent):
-
+class Rest(Agent):
     """
     Document agent constructor here.
     """
 
-    def __init__(self, setting1=1, setting2="payload", session=sessionmaker(bind=engine)(), **kwargs):
-        super(DataLogger, self).__init__(**kwargs)
+    def __init__(self, setting1=1, setting2="some/random/topic", **kwargs):
+        super(Rest, self).__init__(enable_web=True, **kwargs)
         _log.debug("vip_identity: " + self.core.identity)
-
-        self.__session = session
 
         self.setting1 = setting1
         self.setting2 = setting2
@@ -102,42 +58,6 @@ class DataLogger(Agent):
         self.vip.config.set_default("config", self.default_config)
         # Hook self.configure up to changes to the configuration file "config".
         self.vip.config.subscribe(self.configure, actions=["NEW", "UPDATE"], pattern="config")
-
-    def insert(self, body):
-        datetime_str = body['datetime']
-        date_time = dt.strptime(datetime_str, "%Y-%m-%d %H:%M:%S.%f")
-        timestamp = int(date_time.replace(tzinfo=pytz.UTC).timestamp())
-        datetime_timestamptz = date_time.replace(tzinfo=pytz.UTC)
-
-        temperature = RawData(
-            device_id=body["id"],
-            timestamp=timestamp,
-            datetime=datetime_timestamptz,
-            datapoint="temperature",
-            value=body["temperature"]
-        )
-        humidity = RawData(
-            device_id=body["id"],
-            timestamp=timestamp,
-            datetime=datetime_timestamptz,
-            datapoint="humidity",
-            value=body["humidity"]
-        )
-        co2 = RawData(
-            device_id=body["id"],
-            timestamp=timestamp,
-            datetime=datetime_timestamptz,
-            datapoint="co2",
-            value=body["co2"]
-        )
-        self.__session.add(temperature)
-        self.__session.add(humidity)
-        self.__session.add(co2)
-        self.__session.commit()
-        data = self.__session.query(RawData).all()[-1]
-        data_dict = data.to_dict()
-        _log.info("Query: {}".format(data_dict))
-
 
     def configure(self, config_name, action, contents):
         """
@@ -160,10 +80,8 @@ class DataLogger(Agent):
 
         self.setting1 = setting1
         self.setting2 = setting2
-        _log.info("Setting1: {}".format(self.setting1))
-        _log.info("Setting2: {}".format(self.setting2))
 
-        self._create_subscriptions("payload")
+        self._create_subscriptions(self.setting2)
 
     def _create_subscriptions(self, topic):
         """
@@ -177,7 +95,10 @@ class DataLogger(Agent):
                                   callback=self._handle_publish)
 
     def _handle_publish(self, peer, sender, bus, topic, headers, message):
-        self.insert(message)
+        """
+        Callback triggered by the subscription setup using the topic from the agent's config file
+        """
+        pass
 
     @Core.receiver("onstart")
     def onstart(self, sender, **kwargs):
@@ -191,10 +112,17 @@ class DataLogger(Agent):
         """
         # Example publish to pubsub
         self.vip.pubsub.publish('pubsub', "some/random/topic", message="HI!")
+        self.vip.web.register_endpoint(r'/test', self.handle_request)
 
         # Example RPC call
         # self.vip.rpc.call("some_agent", "some_method", arg1, arg2)
         pass
+
+    def handle_request(self, request):
+        """
+        Handle incoming requests
+        """
+        return "Hello, World!"
 
     @Core.receiver("onstop")
     def onstop(self, sender, **kwargs):
@@ -216,7 +144,7 @@ class DataLogger(Agent):
 
 def main():
     """Main method called to start the agent."""
-    utils.vip_main(data_logger, 
+    utils.vip_main(rest, 
                    version=__version__)
 
 
